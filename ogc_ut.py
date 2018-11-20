@@ -9,20 +9,22 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 # import for mathematical manipulation
 import numpy
 import math
-# semaphores for concurrent processes
-import threading
+# for syncro
+import message_filters
 
 class occupancy_grid(object):
 	def __init__(self):
 		# create this node
 		rospy.init_node('mapping_occupancy_grid')
 		# set subscribes and publishes (check topic names)
-		rospy.Subscriber("/scan", LaserScan, self.LaserCallback)
-		rospy.Subscriber("/amcl_pose",PoseWithCovarianceStamped, self.PositionCallback)
+		lasersub = message_filters.Subscriber("/scan", LaserScan)
+		posesub = message_filters.Subscriber("/amcl_pose",PoseWithCovarianceStamped)
+		sincronizer = message_filters.TimeSynchronizer([lasersub, posesub], 10)
+		sincronizer.registerCallback(self.dataCallback)
 		self.map_pub = rospy.Publisher('/map2',OccupancyGrid, queue_size=0)
 		# laser params (start empty)
-		self.max_range= 5
-	   	self.min_range= 0.02
+		self.max_range= None
+	   	self.min_range= None
 		self.angle_min= None
 		self.angle_max= None
 		self.angle_increment= None
@@ -42,26 +44,23 @@ class occupancy_grid(object):
 		print("Initialized")
 
 
+
 	# ---------------- call backs for data ------------------
-	def LaserCallback(self, msg):
+	def dataCallback(self, msg_laser, msg_pose):
 		# set the laser values
-		self.max_range=msg.range_max - 0.5 # account for error?
-	   	self.min_range=msg.range_min + 0.5 # why not?
-		self.angle_min=msg.angle_min
-		self.angle_max=msg.angle_max
-		self.angle_increment=msg.angle_increment
-		self.ranges=msg.ranges
-
-	def PositionCallback(self,msg):
+		self.max_range=msg_laser.range_max -0.5
+	   	self.min_range=msg_laser.range_min +0.5
+		self.angle_min=msg_laser.angle_min
+		self.angle_max=msg_laser.angle_max
+		self.angle_increment=msg_laser.angle_increment
+		self.ranges=msg_laser.ranges
+		
 		# set position values
-		#position and orientation for 3d spaces (6 variables)
-		quartenion= [msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w]
-		(roll, pitch, yaw) = tf.transformations.euler_from_quaternion(quartenion)
-
-		#get it on the object for 2d (3 variables)
-		self.pos_x = msg.pose.pose.position.x
-		self.pos_y = msg.pose.pose.position.y
-		self.pos_yaw = yaw
+		#orientation for 3d spaces (4 variables)
+		self.quartenion= [msg_pose.pose.pose.orientation.x, msg_pose.pose.pose.orientation.y, msg_pose.pose.pose.orientation.z, msg_pose.pose.pose.orientation.w]
+		#position for 2d (2 variables)
+		self.pos_x = msg_pose.pose.pose.position.x
+		self.pos_y = msg_pose.pose.pose.position.y
 
 	# ------------------------------------------------------
 
@@ -95,7 +94,7 @@ class occupancy_grid(object):
 	# ---------------- line drawing related ----------------
 	def plotLineLow(self, x0,y0, x1,y1, lupdate):
 		#bayers log odds
-		l0 = math.log(0.5/0.5) #0
+		l0 = 0
 		lupdate_aux = lupdate
 		#bresenham
 		dx = x1 - x0
@@ -122,7 +121,7 @@ class occupancy_grid(object):
 		
 	def plotLineHigh(self, x0,y0, x1,y1, lupdate):
 		#bayers log odds
-		l0 = math.log(0.5/0.5) #0
+		l0 = 0
 		lupdate_aux = lupdate
 		#bresenham
 		dx = x1 - x0
@@ -171,8 +170,8 @@ class occupancy_grid(object):
 	def calculate_hit(self, x0, y0, distance, rotation):
 		# initial variables of log odds
 		lupdate = 0
-		lfree = math.log(0.3/(1-0.3))
-		locc = math.log(0.7/(1-0.7))
+		lfree = math.log(0.4/(1-0.4))
+		locc = math.log(0.6/(1-0.6))
 		lunk = math.log(0.5/(1-0.5))
 		# according to documentation the error is given by
 		if distance > 0 and distance < 1:
@@ -188,8 +187,8 @@ class occupancy_grid(object):
 		x2 = int(x0+round((distance + 0.5*laser_error)*(math.cos(rotation))*(1/self.resolution)))
 		y2 = int(y0+round((distance + 0.5*laser_error)*(math.sin(rotation))*(1/self.resolution)))
 		# point after the hit, but within laser range
-		x3 = int(x0+round((self.max_range)*(math.cos(rotation))*(1/self.resolution)))
-		y3 = int(y0+round((self.max_range)*(math.sin(rotation))*(1/self.resolution)))
+		#x3 = int(x0+round((self.max_range)*(math.cos(rotation))*(1/self.resolution)))
+		#y3 = int(y0+round((self.max_range)*(math.sin(rotation))*(1/self.resolution)))
 		#free part of the line
 		lupdate = lfree
 		self.bresenham_line(x0, y0, x1, y1, lupdate)
@@ -197,8 +196,8 @@ class occupancy_grid(object):
 		lupdate = locc
 		self.bresenham_line(x1, y1, x2, y2, lupdate)
 		#get it to be unknonw
-		lupdate = lunk
-		self.bresenham_line(x2,y2, x3,y3, lupdate)
+		#lupdate = lunk
+		#self.bresenham_line(x2,y2, x3,y3, lupdate)
 		
 
 	# ----------------- OUR PROGRAM MASTER -----------------
@@ -206,7 +205,6 @@ class occupancy_grid(object):
 	def occupancy_grider(self):
 		# some local variables
 		j = 1
-		landing_points = []
 		# it's supposed to run on a loop
 		while not rospy.is_shutdown():
 			# stuck until we get data
@@ -214,36 +212,42 @@ class occupancy_grid(object):
 				rospy.sleep(0.1)
 				continue
 
+			# steal all unstable variables from object to not interfere in the calcule
+			pos_xm = self.pos_x
+			pos_ym = self.pos_y
+			quartenion = self.quartenion
+			scan_ranges = list(self.ranges)
+
+
 			# translate meters to pixels of position
-			pos_x = int(round((self.pos_x + self.offset) / self.resolution))
-			pos_y = int(round((self.pos_y + self.offset) / self.resolution))
-			print("pos_x ", pos_x, "pos_y", pos_y, "iteration: ", j)
+			pos_x = int(round((pos_xm + self.offset) / self.resolution))
+			pos_y = int(round((pos_ym + self.offset) / self.resolution))
+			# translate quartenion to roll, pitch, yaw. we only need yaw			
+			(roll, pitch, pos_yaw) = tf.transformations.euler_from_quaternion(quartenion)
+			# print check
+			print("pos_x ", pos_x, "pos_y", pos_y,"pos_yaw", round(pos_yaw,4), "j: ", j)
 
 			# for each range
-			for i in range(0, len(self.ranges)):
-				# do not let the callbacks steal the value!
-				range_aux = self.ranges[i]
+			for i in range(0, len(scan_ranges)):
 				# check if it's a valid value
-				if not numpy.isnan(range_aux) and range_aux <= self.max_range and range_aux >= self.min_range:
+				if not numpy.isnan(scan_ranges[i]) and scan_ranges[i] <= self.max_range and scan_ranges[i] >= self.min_range:
 					# calculate laser lines in the map
-					rotation = self.pos_yaw + self.angle_min + self.angle_increment*i
-					self.calculate_hit(pos_x, pos_y, range_aux, rotation)
+					rotation = pos_yaw + self.angle_min + self.angle_increment*i
+					self.calculate_hit(pos_x, pos_y, scan_ranges[i], rotation)
 				
 
 			# publish in the end of x iterations, because
-			if j > 500:
-				self.map_pub.publish(self.map_no)
-				print("Published!")				
+			if j > 50:
+				self.map_pub.publish(self.map_no)		
 				j = 1
 			j = j + 1
-		
 
 
 
 # our main to create the object and run the algorithm
 def main():
-	myobject = occupancy_grid()
-	myobject.occupancy_grider()
+	mymap = occupancy_grid()
+	mymap.occupancy_grider()
 
 
 # does this line also go in if we're a ROS node?
