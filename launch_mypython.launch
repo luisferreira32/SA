@@ -1,3 +1,0 @@
-<launch>
-	<node pkg="myspecial" name="publisher_node" type="pub_ut.py" output="screen"/>
-</launch>
