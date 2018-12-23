@@ -11,6 +11,8 @@ import numpy
 import math
 # for syncro
 import message_filters
+# others
+import time
 
 class occupancy_grid(object):
 	def __init__(self):
@@ -30,6 +32,7 @@ class occupancy_grid(object):
 		self.angle_increment= None
 		self.ranges= None
 		# pose params (start empty)
+		self.cov = None
 		self.pos_x = None
 		self.pos_y = None
 		self.pos_yaw = None
@@ -44,7 +47,6 @@ class occupancy_grid(object):
 		print("Initialized")
 
 
-
 	# ---------------- call backs for data ------------------
 	def dataCallback(self, msg_laser, msg_pose):
 		# set the laser values
@@ -56,6 +58,8 @@ class occupancy_grid(object):
 		self.ranges=msg_laser.ranges
 		
 		# set position values
+		#covariance
+		self.cov = msg_pose.pose.covariance
 		#orientation for 3d spaces (4 variables)
 		self.quartenion= [msg_pose.pose.pose.orientation.x, msg_pose.pose.pose.orientation.y, msg_pose.pose.pose.orientation.z, msg_pose.pose.pose.orientation.w]
 		#position for 2d (2 variables)
@@ -113,7 +117,10 @@ class occupancy_grid(object):
 		#walk according to the inclination
 		for x in range(x0, x1+1,xi):
 			self.map_lo[x][y] = self.map_lo[x][y] - l0 + lupdate_aux
-			self.map_no.data[x + self.width * y] = int(round(100*(1 - 1/(1+math.exp(self.map_lo[x][y])))))
+			try:
+				self.map_no.data[x + self.width * y] = int(round(100*(1 - 1/(1+math.exp(self.map_lo[x][y])))))
+			except:
+				pass
 			if D > 0:
 			   y = y + yi
 			   D = D - 2*dx
@@ -140,7 +147,10 @@ class occupancy_grid(object):
 		#walk according to the inclination
 		for y in range(y0, y1+1, yi):
 			self.map_lo[x][y] = self.map_lo[x][y] - l0 + lupdate_aux
-			self.map_no.data[x + self.width * y] = int(round(100*(1 - 1/(1+math.exp(self.map_lo[x][y])))))
+			try:
+				self.map_no.data[x + self.width * y] = int(round(100*(1 - 1/(1+math.exp(self.map_lo[x][y])))))
+			except:
+				pass
 			if D > 0:
 				x = x + xi
 				D = D - 2*dy
@@ -170,8 +180,8 @@ class occupancy_grid(object):
 	def calculate_hit(self, x0, y0, distance, rotation):
 		# initial variables of log odds
 		lupdate = 0
-		lfree = math.log(0.4/(1-0.4))
-		locc = math.log(0.6/(1-0.6))
+		lfree = math.log(0.3/(1-0.3))
+		locc = math.log(0.7/(1-0.7))
 		lunk = math.log(0.5/(1-0.5))
 		# according to documentation the error is given by
 		if distance > 0 and distance < 1:
@@ -186,31 +196,31 @@ class occupancy_grid(object):
 		# assuming bounce of laser error to maximum value
 		x2 = int(x0+round((distance + 0.5*laser_error)*(math.cos(rotation))*(1/self.resolution)))
 		y2 = int(y0+round((distance + 0.5*laser_error)*(math.sin(rotation))*(1/self.resolution)))
-		# point after the hit, but within laser range
-		#x3 = int(x0+round((self.max_range)*(math.cos(rotation))*(1/self.resolution)))
-		#y3 = int(y0+round((self.max_range)*(math.sin(rotation))*(1/self.resolution)))
-		#free part of the line
+
+		# free part of the line
 		lupdate = lfree
 		self.bresenham_line(x0, y0, x1, y1, lupdate)
-		#occupied part of the line
+		# occupied part of the line WITH UNIFORM DISTRIBUTION (KINDA WRONG FOR NOW)
+		# lupdate = locc/numpy.linalg.norm([x1-x2,y1-y2])
 		lupdate = locc
 		self.bresenham_line(x1, y1, x2, y2, lupdate)
-		#get it to be unknonw
-		#lupdate = lunk
-		#self.bresenham_line(x2,y2, x3,y3, lupdate)
 		
 
 	# ----------------- OUR PROGRAM MASTER -----------------
 	# calls all other functions to update the og
 	def occupancy_grider(self):
 		# some local variables
-		j = 1
+		(j,p) = [1,1]
+		file = open("/home/yourself/Desktop/basement.txt", "w")
 		# it's supposed to run on a loop
 		while not rospy.is_shutdown():
 			# stuck until we get data
 			if None in (self.pos_x, self.ranges):
-				rospy.sleep(0.1)
+				rospy.sleep(0.01)
 				continue
+
+			# tic
+			tic = time.time()
 
 			# steal all unstable variables from object to not interfere in the calcule
 			pos_xm = self.pos_x
@@ -218,14 +228,14 @@ class occupancy_grid(object):
 			quartenion = self.quartenion
 			scan_ranges = list(self.ranges)
 
-
 			# translate meters to pixels of position
 			pos_x = int(round((pos_xm + self.offset) / self.resolution))
 			pos_y = int(round((pos_ym + self.offset) / self.resolution))
 			# translate quartenion to roll, pitch, yaw. we only need yaw			
 			(roll, pitch, pos_yaw) = tf.transformations.euler_from_quaternion(quartenion)
+			
 			# print check
-			print("pos_x ", pos_x, "pos_y", pos_y,"pos_yaw", round(pos_yaw,4), "j: ", j)
+			# print("pos_x ", pos_x, "pos_y", pos_y,"pos_yaw", round(pos_yaw,4), "j: ", j)
 
 			# for each range
 			for i in range(0, len(scan_ranges)):
@@ -235,12 +245,17 @@ class occupancy_grid(object):
 					rotation = pos_yaw + self.angle_min + self.angle_increment*i
 					self.calculate_hit(pos_x, pos_y, scan_ranges[i], rotation)
 				
+			# toc
+			toc = time.time() - tic
+			file.write(str(toc) + "\n")
 
 			# publish in the end of x iterations, because
 			if j > 50:
 				self.map_pub.publish(self.map_no)		
 				j = 1
 			j = j + 1
+
+		file.close()
 
 
 
